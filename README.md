@@ -1,5 +1,7 @@
 # Mastodon CLI (Go)
 
+![Mastodon CLI](image.png)
+
 Minimal Go CLI for Mastodon. Supports OAuth login and reading your home timeline.
 
 ## Features

@@ -63,6 +63,8 @@ func newTimelineModel(client *mastodon.Client) timelineModel {
 	l.Title = "Home timeline"
 	l.SetShowHelp(true)
 	l.SetFilteringEnabled(true)
+	l.SetShowStatusBar(true)
+	l.SetShowPagination(true)
 	l.AdditionalFullHelpKeys = func() []key.Binding {
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
@@ -87,8 +89,11 @@ func newTimelineModel(client *mastodon.Client) timelineModel {
 }
 
 func (m timelineModel) Init() tea.Cmd {
-	m.list.StartSpinner()
+	if len(m.statuses) == 0 {
+		m.list.SetItems([]list.Item{loadingItem()})
+	}
 	return tea.Batch(
+		m.list.StartSpinner(),
 		fetchTimelineCmd(m.client, 40, ""),
 		m.spinner.Tick,
 	)
@@ -105,8 +110,8 @@ func (m timelineModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.loading = true
-			m.list.StartSpinner()
 			return m, tea.Batch(
+				m.list.StartSpinner(),
 				fetchTimelineCmd(m.client, 40, m.topID),
 				m.spinner.Tick,
 			)
@@ -119,6 +124,7 @@ func (m timelineModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case timelineMsg:
 		m.loading = false
 		m.list.StopSpinner()
+		m.list.Title = "Home timeline"
 		if msg.sinceID != "" {
 			m.prependStatuses(msg.statuses)
 			if len(msg.statuses) == 0 {
@@ -136,11 +142,13 @@ func (m timelineModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case timelineErrMsg:
 		m.loading = false
 		m.list.StopSpinner()
+		m.list.Title = "Home timeline"
 		return m, m.list.NewStatusMessage(fmt.Sprintf("Error: %v", msg.err))
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		if m.loading {
+			m.list.Title = fmt.Sprintf("%s Home timeline", m.spinner.View())
 			m.renderDetail()
 			return m, cmd
 		}
@@ -191,9 +199,13 @@ func (m *timelineModel) resize() {
 
 func (m *timelineModel) setStatuses(statuses []mastodon.Status) {
 	m.statuses = statuses
-	items := make([]list.Item, 0, len(statuses))
-	for _, item := range statuses {
-		items = append(items, statusToItem(item, m.list.Width()))
+	items := make([]list.Item, 0, max(1, len(statuses)))
+	if len(statuses) == 0 {
+		items = append(items, emptyItem())
+	} else {
+		for _, item := range statuses {
+			items = append(items, statusToItem(item, m.list.Width()))
+		}
 	}
 	m.list.SetItems(items)
 	if len(statuses) > 0 {
@@ -207,7 +219,7 @@ func (m *timelineModel) prependStatuses(statuses []mastodon.Status) {
 	}
 
 	m.statuses = append(statuses, m.statuses...)
-	items := make([]list.Item, 0, len(m.statuses))
+	items := make([]list.Item, 0, max(1, len(m.statuses)))
 	for _, item := range m.statuses {
 		items = append(items, statusToItem(item, m.list.Width()))
 	}
@@ -261,6 +273,20 @@ func statusToItem(item mastodon.Status, width int) timelineItem {
 		id:      display.ID,
 		title:   title,
 		snippet: snippet,
+	}
+}
+
+func loadingItem() timelineItem {
+	return timelineItem{
+		title:   "Loading timeline...",
+		snippet: "Fetching latest statuses...",
+	}
+}
+
+func emptyItem() timelineItem {
+	return timelineItem{
+		title:   "No statuses",
+		snippet: "Your home timeline is empty.",
 	}
 }
 
