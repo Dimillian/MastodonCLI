@@ -24,6 +24,8 @@ func Run(args []string) error {
 		return runTimeline(args[2:])
 	case "posts":
 		return runPosts(args[2:])
+	case "notifications":
+		return runNotifications(args[2:])
 	case "ui":
 		return runUI(args[2:])
 	case "help", "-h", "--help":
@@ -186,6 +188,33 @@ func runPosts(args []string) error {
 	return nil
 }
 
+func runNotifications(args []string) error {
+	fs := flag.NewFlagSet("notifications", flag.ExitOnError)
+	limit := fs.Int("limit", 20, "Number of notifications to fetch (1-40)")
+	fs.Parse(args)
+
+	if *limit <= 0 || *limit > 40 {
+		return fmt.Errorf("limit must be between 1 and 40")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	if cfg.Instance == "" || cfg.AccessToken == "" {
+		return fmt.Errorf("missing config; run `mastodon login --instance <domain>` first")
+	}
+
+	client := mastodon.NewClient(cfg.Instance, cfg.AccessToken)
+	notifications, err := client.GroupedNotifications(*limit)
+	if err != nil {
+		return err
+	}
+
+	output.PrintNotifications(notifications)
+	return nil
+}
+
 func runUI(args []string) error {
 	if len(args) != 0 {
 		return fmt.Errorf("ui does not accept arguments")
@@ -208,5 +237,6 @@ func printUsage() {
 	fmt.Println("  mastodon login --instance <domain> [--force]")
 	fmt.Println("  mastodon timeline --limit <n>")
 	fmt.Println("  mastodon posts --limit <n> [--boosts] [--replies]")
+	fmt.Println("  mastodon notifications --limit <n>")
 	fmt.Println("  mastodon ui")
 }

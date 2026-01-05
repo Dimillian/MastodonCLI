@@ -41,6 +41,34 @@ func PrintStatuses(statuses []mastodon.Status) {
 	}
 }
 
+func PrintNotifications(notifications []mastodon.GroupedNotification) {
+	if len(notifications) == 0 {
+		fmt.Println("No notifications returned.")
+		return
+	}
+
+	for _, item := range notifications {
+		fmt.Println("----")
+		fmt.Printf("%sType:%s  %s (%d)\n", colorCyan, colorReset, notificationTypeLabel(item.Type), item.Count)
+		fmt.Printf("%sFrom:%s  %s\n", colorCyan, colorReset, notificationAccountsLabel(item.Accounts))
+		if item.LatestAt != "" {
+			fmt.Printf("%sTime:%s  %s\n", colorYellow, colorReset, item.LatestAt)
+		} else {
+			fmt.Printf("%sTime:%s  Unknown\n", colorYellow, colorReset)
+		}
+
+		if item.Status != nil {
+			fmt.Println("Text:")
+			body := WrapText(StripHTML(item.Status.Content), 80)
+			if body == "" {
+				body = "(no text)"
+			}
+			fmt.Println(body)
+		}
+		fmt.Println()
+	}
+}
+
 func StripHTML(input string) string {
 	var builder strings.Builder
 	builder.Grow(len(input))
@@ -94,6 +122,52 @@ func WrapText(text string, width int) string {
 	}
 
 	return builder.String()
+}
+
+func notificationTypeLabel(value string) string {
+	switch value {
+	case "mention":
+		return "Mention"
+	case "status":
+		return "Status"
+	case "reblog":
+		return "Boost"
+	case "favourite":
+		return "Favorite"
+	case "follow":
+		return "Follow"
+	case "follow_request":
+		return "Follow request"
+	case "poll":
+		return "Poll"
+	case "update":
+		return "Update"
+	case "admin.sign_up":
+		return "Sign up"
+	case "admin.report":
+		return "Report"
+	default:
+		return value
+	}
+}
+
+func notificationAccountsLabel(accounts []mastodon.Account) string {
+	if len(accounts) == 0 {
+		return "Unknown"
+	}
+	if len(accounts) == 1 {
+		return formatAccount(accounts[0])
+	}
+	first := formatAccount(accounts[0])
+	return fmt.Sprintf("%s +%d", first, len(accounts)-1)
+}
+
+func formatAccount(account mastodon.Account) string {
+	name := strings.TrimSpace(StripHTML(account.DisplayName))
+	if name != "" && name != account.Acct {
+		return fmt.Sprintf("%s (@%s)", name, account.Acct)
+	}
+	return fmt.Sprintf("@%s", account.Acct)
 }
 
 const (

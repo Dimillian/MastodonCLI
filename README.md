@@ -2,12 +2,13 @@
 
 ![Mastodon CLI](image.png)
 
-Minimal Go CLI for Mastodon. Supports OAuth login and reading your home timeline.
+Minimal Go CLI and TUI for Mastodon. Supports OAuth login, timeline browsing, notifications, and reading your own posts.
 
 ## Features
 
 - OAuth authorization code flow (OOB redirect)
-- Home timeline fetch with configurable limit
+- CLI: home timeline and your own posts (with pagination up to 800)
+- TUI: timeline modes (Home/Local/Federated/Trending), notifications, profile, and a search placeholder
 - Local config storage with secure permissions
 
 ## Installation
@@ -36,6 +37,12 @@ Fetch your own posts:
 ./mastodon posts --limit 10
 ```
 
+Fetch grouped notifications:
+
+```bash
+./mastodon notifications --limit 10
+```
+
 Show help:
 
 ```bash
@@ -47,6 +54,12 @@ Launch the TUI:
 ```bash
 ./mastodon ui
 ```
+
+## TUI shortcuts
+
+- `tab` / `shift+tab`: switch top-level tabs
+- `t` / `s` / `p` / `n`: jump to Timeline / Search / Profile / Notifications
+- Timeline modes: `h` (Home), `l` (Local), `f` (Federated), `g` (Trending), `r` (refresh)
 
 ## Configuration
 
@@ -68,8 +81,20 @@ File permissions are set to `0600`.
   - Reads the home timeline. `n` must be 1-40.
 - `posts --limit <n> [--boosts] [--replies]`
   - Reads your own posts. By default boosts and replies are excluded. Supports pagination up to 800 posts and shows progress for larger requests.
+- `notifications --limit <n>`
+  - Reads grouped notifications. `n` must be 1-40.
 - `ui`
-  - Launches a TUI to browse your home timeline. Press `r` to fetch newer statuses.
+  - Launches the TUI.
+
+## Quick smoke tests
+
+```bash
+./mastodon login --instance mastodon.social
+./mastodon timeline --limit 5
+./mastodon posts --limit 5
+./mastodon notifications --limit 5
+./mastodon ui
+```
 
 ## API Notes
 
@@ -79,5 +104,9 @@ This CLI follows the Mastodon API docs:
 - OAuth authorization: `GET /oauth/authorize`
 - Token exchange: `POST /oauth/token`
 - Home timeline: `GET /api/v1/timelines/home`
+- Local timeline: `GET /api/v1/timelines/public?local=true`
+- Federated timeline: `GET /api/v1/timelines/public`
+- Trending: `GET /api/v1/trends/statuses`
+- Notifications (grouped): `GET /api/v2/notifications`
 
 Scopes: the CLI requests `read`, which is sufficient for home timeline access.

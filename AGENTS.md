@@ -41,6 +41,7 @@ MastodonCLI is a Go-based Mastodon client with both a CLI and a TUI. It supports
 - Use `rg` for searching
 - Keep ASCII in files unless existing file uses Unicode
 - Prefer updating shared client logic in `internal/mastodon` so CLI and TUI stay in sync
+- Maintain CLI parity: every user-facing feature exposed in the TUI should also have a CLI command
 
 ## Mastodon API Docs (Quick Navigation)
 Primary docs: https://docs.joinmastodon.org/api/
