@@ -11,6 +11,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      GO111MODULE: "on"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
