@@ -61,6 +61,10 @@ func Save(cfg *Config) error {
 }
 
 func Path() (string, error) {
+	if override, ok := os.LookupEnv("XDG_CONFIG_HOME"); ok && override != "" {
+		return filepath.Join(override, "mastodon-cli", "config.json"), nil
+	}
+
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve config dir: %w", err)
