@@ -13,6 +13,24 @@ import (
 
 	"mastodoncli/internal/mastodon"
 	"mastodoncli/internal/output"
+	"mastodoncli/internal/ui/components"
+)
+
+type topTab int
+
+type timelineMode int
+
+const (
+	tabTimeline topTab = iota
+	tabSearch
+	tabProfile
+)
+
+const (
+	modeHome timelineMode = iota
+	modeLocal
+	modeFederated
+	modeTrending
 )
 
 type timelineItem struct {
@@ -25,42 +43,89 @@ func (t timelineItem) Title() string       { return t.title }
 func (t timelineItem) Description() string { return t.snippet }
 func (t timelineItem) FilterValue() string { return t.title + " " + t.snippet }
 
-type timelineModel struct {
-	client   *mastodon.Client
+type feedView struct {
 	list     list.Model
 	detail   viewport.Model
 	statuses []mastodon.Status
 	topID    string
 	loading  bool
-	width    int
-	height   int
 	selected int
-	spinner  spinner.Model
+}
+
+type searchView struct {
+	viewport viewport.Model
+}
+
+type model struct {
+	client           *mastodon.Client
+	activeTab        topTab
+	activeTimeline   timelineMode
+	timelineViews    map[timelineMode]*feedView
+	profileView      *feedView
+	searchView       searchView
+	profileAccountID string
+	spinner          spinner.Model
+	width            int
+	height           int
 }
 
 type timelineMsg struct {
+	mode     timelineMode
 	statuses []mastodon.Status
 	sinceID  string
 }
 
-type timelineErrMsg struct {
-	err error
+type profileMsg struct {
+	statuses  []mastodon.Status
+	accountID string
+}
+
+type feedErrMsg struct {
+	tab  topTab
+	mode timelineMode
+	err  error
 }
 
 func Run(client *mastodon.Client) error {
-	model := newTimelineModel(client)
-	_, err := tea.NewProgram(model, tea.WithAltScreen()).Run()
+	m := newModel(client)
+	_, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
 }
 
-func newTimelineModel(client *mastodon.Client) timelineModel {
+func newModel(client *mastodon.Client) model {
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
+
+	timelineViews := map[timelineMode]*feedView{
+		modeHome:      newFeedView("Home timeline"),
+		modeLocal:     newFeedView("Local timeline"),
+		modeFederated: newFeedView("Federated timeline"),
+		modeTrending:  newFeedView("Trending"),
+	}
+
+	profile := newFeedView("Profile")
+	search := searchView{viewport: viewport.New(0, 0)}
+
+	return model{
+		client:         client,
+		activeTab:      tabTimeline,
+		activeTimeline: modeHome,
+		timelineViews:  timelineViews,
+		profileView:    profile,
+		searchView:     search,
+		spinner:        sp,
+	}
+}
+
+func newFeedView(title string) *feedView {
 	delegate := list.NewDefaultDelegate()
 	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.Foreground(lipgloss.Color("86"))
 	delegate.Styles.SelectedDesc = delegate.Styles.SelectedDesc.Foreground(lipgloss.Color("86"))
 	delegate.SetHeight(3)
 
 	l := list.New([]list.Item{}, delegate, 0, 0)
-	l.Title = "Home timeline"
+	l.Title = title
 	l.SetShowHelp(true)
 	l.SetFilteringEnabled(true)
 	l.SetShowStatusBar(true)
@@ -68,6 +133,8 @@ func newTimelineModel(client *mastodon.Client) timelineModel {
 	l.AdditionalFullHelpKeys = func() []key.Binding {
 		return []key.Binding{
 			key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+			key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next tab")),
+			key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev tab")),
 			key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		}
 	}
@@ -75,177 +142,485 @@ func newTimelineModel(client *mastodon.Client) timelineModel {
 
 	vp := viewport.New(0, 0)
 	vp.YPosition = 0
-	sp := spinner.New()
-	sp.Spinner = spinner.Dot
-	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
 
-	return timelineModel{
-		client:  client,
+	return &feedView{
 		list:    l,
 		detail:  vp,
 		loading: true,
-		spinner: sp,
 	}
 }
 
-func (m timelineModel) Init() tea.Cmd {
-	if len(m.statuses) == 0 {
-		m.list.SetItems([]list.Item{loadingItem()})
-	}
+func (m model) Init() tea.Cmd {
+	m.timelineView().list.SetItems([]list.Item{loadingItem()})
+	m.timelineView().list.StartSpinner()
 	return tea.Batch(
-		m.list.StartSpinner(),
-		fetchTimelineCmd(m.client, 40, ""),
+		fetchTimelineCmd(m.client, modeHome, ""),
 		m.spinner.Tick,
 	)
 }
 
-func (m timelineModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case "r":
-			if m.loading {
-				return m, nil
-			}
-			m.loading = true
-			return m, tea.Batch(
-				m.list.StartSpinner(),
-				fetchTimelineCmd(m.client, 40, m.topID),
-				m.spinner.Tick,
-			)
-		}
+		return m.handleKey(msg)
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.resize()
-		m.renderDetail()
+		m.resizeAll()
+		m.renderCurrentDetail()
+		m.renderSearch()
 	case timelineMsg:
-		m.loading = false
-		m.list.StopSpinner()
-		m.list.Title = "Home timeline"
+		view := m.timelineViews[msg.mode]
+		view.loading = false
+		view.list.StopSpinner()
 		if msg.sinceID != "" {
-			m.prependStatuses(msg.statuses)
+			m.prependStatuses(view, msg.statuses)
+			m.renderCurrentDetail()
 			if len(msg.statuses) == 0 {
-				return m, m.list.NewStatusMessage("No new statuses.")
+				return m, view.list.NewStatusMessage("No new statuses.")
 			}
-			m.renderDetail()
-			return m, m.list.NewStatusMessage(fmt.Sprintf("Fetched %d new statuses.", len(msg.statuses)))
+			return m, view.list.NewStatusMessage(fmt.Sprintf("Fetched %d new statuses.", len(msg.statuses)))
 		}
-		m.setStatuses(msg.statuses)
-		m.renderDetail()
+		m.setStatuses(view, msg.statuses)
+		m.renderCurrentDetail()
 		if len(msg.statuses) == 0 {
-			return m, m.list.NewStatusMessage("No statuses returned.")
+			return m, view.list.NewStatusMessage("No statuses returned.")
 		}
-		return m, m.list.NewStatusMessage(fmt.Sprintf("Loaded %d statuses.", len(msg.statuses)))
-	case timelineErrMsg:
-		m.loading = false
-		m.list.StopSpinner()
-		m.list.Title = "Home timeline"
-		return m, m.list.NewStatusMessage(fmt.Sprintf("Error: %v", msg.err))
+		return m, view.list.NewStatusMessage(fmt.Sprintf("Loaded %d statuses.", len(msg.statuses)))
+	case profileMsg:
+		view := m.profileView
+		view.loading = false
+		view.list.StopSpinner()
+		if msg.accountID != "" {
+			m.profileAccountID = msg.accountID
+		}
+		m.setStatuses(view, msg.statuses)
+		m.renderCurrentDetail()
+		if len(msg.statuses) == 0 {
+			return m, view.list.NewStatusMessage("No statuses returned.")
+		}
+		return m, view.list.NewStatusMessage(fmt.Sprintf("Loaded %d statuses.", len(msg.statuses)))
+	case feedErrMsg:
+		if msg.tab == tabTimeline {
+			view := m.timelineViews[msg.mode]
+			view.loading = false
+			view.list.StopSpinner()
+			return m, view.list.NewStatusMessage(fmt.Sprintf("Error: %v", msg.err))
+		}
+		if msg.tab == tabProfile {
+			view := m.profileView
+			view.loading = false
+			view.list.StopSpinner()
+			return m, view.list.NewStatusMessage(fmt.Sprintf("Error: %v", msg.err))
+		}
+		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		if m.loading {
-			m.list.Title = fmt.Sprintf("%s Home timeline", m.spinner.View())
-			m.renderDetail()
+		if m.isLoading() {
+			m.renderCurrentDetail()
 			return m, cmd
 		}
 	}
 
-	var cmd tea.Cmd
-	m.list, cmd = m.list.Update(msg)
-	if m.list.Index() != m.selected {
-		m.selected = m.list.Index()
-		m.renderDetail()
-	}
-
-	m.detail, _ = m.detail.Update(msg)
-	return m, cmd
+	return m.updateActiveView(msg)
 }
 
-func (m timelineModel) View() string {
+func (m model) View() string {
 	if m.width == 0 {
 		return "Loading..."
 	}
 
-	leftWidth := max(30, m.width/2)
-	rightWidth := m.width - leftWidth - 1
-	if rightWidth < 20 {
-		return m.list.View()
+	header := m.renderHeader()
+	content := m.renderContent()
+
+	return header + "\n" + content
+}
+
+func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "ctrl+c":
+		return m, tea.Quit
+	case "tab":
+		m.activeTab = (m.activeTab + 1) % 3
+		m.resizeAll()
+		m.renderCurrentDetail()
+		m.renderSearch()
+		return m, m.ensureTabLoaded()
+	case "shift+tab":
+		m.activeTab = (m.activeTab + 2) % 3
+		m.resizeAll()
+		m.renderCurrentDetail()
+		m.renderSearch()
+		return m, m.ensureTabLoaded()
+	case "t":
+		m.activeTab = tabTimeline
+		m.resizeAll()
+		m.renderCurrentDetail()
+		m.renderSearch()
+		return m, m.ensureTabLoaded()
+	case "s":
+		m.activeTab = tabSearch
+		m.resizeAll()
+		m.renderSearch()
+		return m, nil
+	case "p":
+		m.activeTab = tabProfile
+		m.resizeAll()
+		m.renderCurrentDetail()
+		m.renderSearch()
+		return m, m.ensureTabLoaded()
+	case "h":
+		if m.activeTab == tabTimeline {
+			return m.switchTimelineMode(modeHome)
+		}
+	case "l":
+		if m.activeTab == tabTimeline {
+			return m.switchTimelineMode(modeLocal)
+		}
+	case "f":
+		if m.activeTab == tabTimeline {
+			return m.switchTimelineMode(modeFederated)
+		}
+	case "g":
+		if m.activeTab == tabTimeline {
+			return m.switchTimelineMode(modeTrending)
+		}
+	case "r":
+		return m.refreshCurrent()
 	}
 
-	left := lipgloss.NewStyle().Width(leftWidth).Height(m.height).Render(m.list.View())
-	right := lipgloss.NewStyle().Width(rightWidth).Height(m.height).Render(m.detail.View())
+	return m.updateActiveView(msg)
+}
+
+func (m model) updateActiveView(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch m.activeTab {
+	case tabTimeline:
+		view := m.timelineView()
+		view.list, cmd = view.list.Update(msg)
+		if view.list.Index() != view.selected {
+			view.selected = view.list.Index()
+			m.renderCurrentDetail()
+		}
+		view.detail, _ = view.detail.Update(msg)
+	case tabProfile:
+		view := m.profileView
+		view.list, cmd = view.list.Update(msg)
+		if view.list.Index() != view.selected {
+			view.selected = view.list.Index()
+			m.renderCurrentDetail()
+		}
+		view.detail, _ = view.detail.Update(msg)
+	case tabSearch:
+		m.searchView.viewport, cmd = m.searchView.viewport.Update(msg)
+	}
+	return m, cmd
+}
+
+func (m model) renderHeader() string {
+	tabs := []string{"Timeline", "Search", "Profile"}
+	var parts []string
+	for i, name := range tabs {
+		style := components.TabStyle
+		if m.activeTab == topTab(i) {
+			style = components.TabActiveStyle
+		}
+		parts = append(parts, components.RenderTabLabel(name, style))
+	}
+	tabRow := lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+	tabRow = components.HeaderStyle.Render(tabRow)
+
+	if m.activeTab != tabTimeline {
+		return tabRow
+	}
+
+	modeRow := m.renderTimelineModes()
+	modeRow = components.HeaderStyle.Render(modeRow)
+	return tabRow + "\n" + modeRow
+}
+
+func (m model) renderTimelineModes() string {
+	labels := []string{"Home", "Local", "Federated", "Trending"}
+	modes := []timelineMode{modeHome, modeLocal, modeFederated, modeTrending}
+	var parts []string
+	for i, label := range labels {
+		style := components.ModeStyle
+		if m.activeTimeline == modes[i] {
+			style = components.ModeActiveStyle
+		}
+		parts = append(parts, components.RenderTabLabel(label, style))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+}
+
+func (m model) renderContent() string {
+	switch m.activeTab {
+	case tabTimeline:
+		return m.renderFeed(m.timelineView())
+	case tabProfile:
+		return m.renderFeed(m.profileView)
+	case tabSearch:
+		return m.searchView.viewport.View()
+	default:
+		return ""
+	}
+}
+
+func (m model) renderFeed(view *feedView) string {
+	leftWidth := components.Max(30, m.width/2)
+	rightWidth := m.width - leftWidth - 1
+	if rightWidth < 20 {
+		return view.list.View()
+	}
+
+	left := lipgloss.NewStyle().Width(leftWidth).Height(m.contentHeight()).Render(view.list.View())
+	right := lipgloss.NewStyle().Width(rightWidth).Height(m.contentHeight()).Render(view.detail.View())
 	sep := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("│")
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, sep, right)
 }
 
-func (m *timelineModel) resize() {
+func (m *model) renderCurrentDetail() {
+	switch m.activeTab {
+	case tabTimeline:
+		m.renderDetail(m.timelineView())
+	case tabProfile:
+		m.renderDetail(m.profileView)
+	}
+}
+
+func (m *model) renderDetail(view *feedView) {
+	if view.detail.Width == 0 {
+		return
+	}
+	if len(view.statuses) == 0 {
+		if view.loading {
+			view.detail.SetContent(fmt.Sprintf("%s Loading timeline...", m.spinner.View()))
+		} else {
+			view.detail.SetContent("No status selected.")
+		}
+		return
+	}
+
+	index := view.list.Index()
+	if index < 0 || index >= len(view.statuses) {
+		index = 0
+	}
+
+	view.detail.SetContent(renderStatusDetail(view.statuses[index], view.detail.Width))
+}
+
+func (m *model) renderSearch() {
+	if m.searchView.viewport.Width == 0 {
+		return
+	}
+	content := "Search\n\n" +
+		"This tab will let you search accounts, hashtags, and statuses.\n" +
+		"(Coming soon)"
+	m.searchView.viewport.SetContent(content)
+}
+
+func (m *model) resizeAll() {
+	for _, view := range m.timelineViews {
+		m.resizeFeed(view)
+	}
+	m.resizeFeed(m.profileView)
+
+	height := m.contentHeight()
+	m.searchView.viewport.Width = m.width
+	m.searchView.viewport.Height = components.Max(5, height)
+}
+
+func (m *model) resizeFeed(view *feedView) {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
 
-	leftWidth := max(30, m.width/2)
+	leftWidth := components.Max(30, m.width/2)
 	rightWidth := m.width - leftWidth - 1
-	listHeight := max(5, m.height-2)
-
-	m.list.SetSize(leftWidth, listHeight)
-	m.detail.Width = rightWidth
-	m.detail.Height = max(5, m.height-2)
+	view.list.SetSize(leftWidth, components.Max(5, m.contentHeight()))
+	view.detail.Width = rightWidth
+	view.detail.Height = components.Max(5, m.contentHeight())
 }
 
-func (m *timelineModel) setStatuses(statuses []mastodon.Status) {
-	m.statuses = statuses
-	items := make([]list.Item, 0, max(1, len(statuses)))
+func (m *model) contentHeight() int {
+	headerLines := 1
+	if m.activeTab == tabTimeline {
+		headerLines = 2
+	}
+	return components.Max(5, m.height-headerLines)
+}
+
+func (m model) timelineView() *feedView {
+	return m.timelineViews[m.activeTimeline]
+}
+
+func (m *model) setStatuses(view *feedView, statuses []mastodon.Status) {
+	view.statuses = statuses
+	items := make([]list.Item, 0, components.Max(1, len(statuses)))
 	if len(statuses) == 0 {
 		items = append(items, emptyItem())
 	} else {
 		for _, item := range statuses {
-			items = append(items, statusToItem(item, m.list.Width()))
+			items = append(items, statusToItem(item, view.list.Width()))
 		}
 	}
-	m.list.SetItems(items)
+	view.list.SetItems(items)
 	if len(statuses) > 0 {
-		m.topID = statuses[0].ID
+		view.topID = statuses[0].ID
 	}
 }
 
-func (m *timelineModel) prependStatuses(statuses []mastodon.Status) {
+func (m *model) prependStatuses(view *feedView, statuses []mastodon.Status) {
 	if len(statuses) == 0 {
 		return
 	}
 
-	m.statuses = append(statuses, m.statuses...)
-	items := make([]list.Item, 0, max(1, len(m.statuses)))
-	for _, item := range m.statuses {
-		items = append(items, statusToItem(item, m.list.Width()))
+	view.statuses = append(statuses, view.statuses...)
+	items := make([]list.Item, 0, components.Max(1, len(view.statuses)))
+	for _, item := range view.statuses {
+		items = append(items, statusToItem(item, view.list.Width()))
 	}
-	m.list.SetItems(items)
-	m.topID = statuses[0].ID
+	view.list.SetItems(items)
+	view.topID = statuses[0].ID
 }
 
-func (m *timelineModel) renderDetail() {
-	if m.detail.Width == 0 {
-		return
+func (m model) isLoading() bool {
+	switch m.activeTab {
+	case tabTimeline:
+		return m.timelineView().loading
+	case tabProfile:
+		return m.profileView.loading
+	default:
+		return false
 	}
-	if len(m.statuses) == 0 {
-		if m.loading {
-			m.detail.SetContent(fmt.Sprintf("%s Loading timeline...", m.spinner.View()))
-		} else {
-			m.detail.SetContent("No status selected.")
+}
+
+func (m *model) ensureTabLoaded() tea.Cmd {
+	switch m.activeTab {
+	case tabTimeline:
+		return m.ensureTimelineLoaded()
+	case tabProfile:
+		return m.ensureProfileLoaded()
+	case tabSearch:
+		return nil
+	default:
+		return nil
+	}
+}
+
+func (m *model) ensureTimelineLoaded() tea.Cmd {
+	view := m.timelineView()
+	if !view.loading && len(view.statuses) > 0 {
+		return nil
+	}
+	view.loading = true
+	view.list.SetItems([]list.Item{loadingItem()})
+	view.list.StartSpinner()
+	return tea.Batch(
+		fetchTimelineCmd(m.client, m.activeTimeline, ""),
+		m.spinner.Tick,
+	)
+}
+
+func (m *model) ensureProfileLoaded() tea.Cmd {
+	view := m.profileView
+	if !view.loading && len(view.statuses) > 0 {
+		return nil
+	}
+	view.loading = true
+	view.list.SetItems([]list.Item{loadingItem()})
+	view.list.StartSpinner()
+	return tea.Batch(
+		fetchProfileCmd(m.client, m),
+		m.spinner.Tick,
+	)
+}
+
+func (m *model) switchTimelineMode(mode timelineMode) (tea.Model, tea.Cmd) {
+	if m.activeTimeline == mode {
+		return m, nil
+	}
+	m.activeTimeline = mode
+	m.resizeAll()
+	m.renderCurrentDetail()
+	return m, m.ensureTimelineLoaded()
+}
+
+func (m *model) refreshCurrent() (tea.Model, tea.Cmd) {
+	switch m.activeTab {
+	case tabTimeline:
+		view := m.timelineView()
+		if view.loading {
+			return m, nil
 		}
-		return
+		view.loading = true
+		view.list.StartSpinner()
+		return m, tea.Batch(
+			fetchTimelineCmd(m.client, m.activeTimeline, view.topID),
+			m.spinner.Tick,
+		)
+	case tabProfile:
+		view := m.profileView
+		if view.loading {
+			return m, nil
+		}
+		view.loading = true
+		view.list.StartSpinner()
+		return m, tea.Batch(
+			fetchProfileCmd(m.client, m),
+			m.spinner.Tick,
+		)
+	default:
+		return m, nil
 	}
+}
 
-	index := m.list.Index()
-	if index < 0 || index >= len(m.statuses) {
-		index = 0
+func fetchTimelineCmd(client *mastodon.Client, mode timelineMode, sinceID string) tea.Cmd {
+	return func() tea.Msg {
+		var statuses []mastodon.Status
+		var err error
+		switch mode {
+		case modeHome:
+			statuses, err = client.HomeTimelinePage(40, sinceID, "")
+		case modeLocal:
+			statuses, err = client.PublicTimelinePage(40, true, false, sinceID, "")
+		case modeFederated:
+			statuses, err = client.PublicTimelinePage(40, false, false, sinceID, "")
+		case modeTrending:
+			if sinceID != "" {
+				statuses, err = client.TrendingStatuses(40)
+			} else {
+				statuses, err = client.TrendingStatuses(40)
+			}
+		default:
+			statuses = nil
+		}
+		if err != nil {
+			return feedErrMsg{tab: tabTimeline, mode: mode, err: err}
+		}
+		return timelineMsg{mode: mode, statuses: statuses, sinceID: sinceID}
 	}
+}
 
-	m.detail.SetContent(renderStatusDetail(m.statuses[index], m.detail.Width))
+func fetchProfileCmd(client *mastodon.Client, m *model) tea.Cmd {
+	return func() tea.Msg {
+		accountID := m.profileAccountID
+		if m.profileAccountID == "" {
+			acct, err := client.VerifyCredentials()
+			if err != nil {
+				return feedErrMsg{tab: tabProfile, err: err}
+			}
+			accountID = acct.ID
+		}
+
+		statuses, err := client.AccountStatuses(accountID, 40, false, false, "")
+		if err != nil {
+			return feedErrMsg{tab: tabProfile, err: err}
+		}
+		return profileMsg{statuses: statuses, accountID: accountID}
+	}
 }
 
 func statusToItem(item mastodon.Status, width int) timelineItem {
@@ -263,8 +638,8 @@ func statusToItem(item mastodon.Status, width int) timelineItem {
 	}
 
 	title := fmt.Sprintf("%s%s · %s", author, boostedBy, display.CreatedAt)
-	snippet := output.WrapText(output.StripHTML(display.Content), max(20, width-6))
-	snippet = truncateLines(snippet, 2)
+	snippet := output.WrapText(output.StripHTML(display.Content), components.Max(20, width-6))
+	snippet = components.TruncateLines(snippet, 2)
 	if snippet == "" {
 		snippet = "(no text)"
 	}
@@ -273,20 +648,6 @@ func statusToItem(item mastodon.Status, width int) timelineItem {
 		id:      display.ID,
 		title:   title,
 		snippet: snippet,
-	}
-}
-
-func loadingItem() timelineItem {
-	return timelineItem{
-		title:   "Loading timeline...",
-		snippet: "Fetching latest statuses...",
-	}
-}
-
-func emptyItem() timelineItem {
-	return timelineItem{
-		title:   "No statuses",
-		snippet: "Your home timeline is empty.",
 	}
 }
 
@@ -304,22 +665,22 @@ func renderStatusDetail(item mastodon.Status, width int) string {
 		author = fmt.Sprintf("%s (@%s)", name, display.Account.Acct)
 	}
 
-	wrapWidth := max(20, width-2)
+	wrapWidth := components.Max(20, width-2)
 	separator := strings.Repeat("-", width)
 
 	var builder strings.Builder
 	builder.WriteString(separator)
 	builder.WriteString("\n")
-	builder.WriteString(authorStyle.Render("Author:"))
+	builder.WriteString(components.AuthorStyle.Render("Author:"))
 	builder.WriteString(" ")
 	builder.WriteString(author)
 	builder.WriteString("\n")
-	builder.WriteString(timeStyle.Render("Time:"))
+	builder.WriteString(components.TimeStyle.Render("Time:"))
 	builder.WriteString("   ")
 	builder.WriteString(display.CreatedAt)
 	builder.WriteString("\n")
 	if boostedBy != "" {
-		builder.WriteString(mutedStyle.Render("Boost:"))
+		builder.WriteString(components.MutedStyle.Render("Boost:"))
 		builder.WriteString("  ")
 		builder.WriteString(boostedBy)
 		builder.WriteString("\n")
@@ -334,38 +695,16 @@ func renderStatusDetail(item mastodon.Status, width int) string {
 	return builder.String()
 }
 
-func truncateLines(text string, maxLines int) string {
-	if maxLines <= 0 {
-		return ""
-	}
-
-	lines := strings.Split(text, "\n")
-	if len(lines) <= maxLines {
-		return text
-	}
-
-	return strings.Join(lines[:maxLines], "\n") + "…"
-}
-
-func fetchTimelineCmd(client *mastodon.Client, limit int, sinceID string) tea.Cmd {
-	return func() tea.Msg {
-		statuses, err := client.HomeTimelinePage(limit, sinceID, "")
-		if err != nil {
-			return timelineErrMsg{err: err}
-		}
-		return timelineMsg{statuses: statuses, sinceID: sinceID}
+func loadingItem() timelineItem {
+	return timelineItem{
+		title:   "Loading timeline...",
+		snippet: "Fetching latest statuses...",
 	}
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
+func emptyItem() timelineItem {
+	return timelineItem{
+		title:   "No statuses",
+		snippet: "Nothing to show here yet.",
 	}
-	return b
 }
-
-var (
-	authorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
-	timeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	mutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-)

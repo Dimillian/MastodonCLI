@@ -41,3 +41,21 @@ MastodonCLI is a Go-based Mastodon client with both a CLI and a TUI. It supports
 - Use `rg` for searching
 - Keep ASCII in files unless existing file uses Unicode
 - Prefer updating shared client logic in `internal/mastodon` so CLI and TUI stay in sync
+
+## Mastodon API Docs (Quick Navigation)
+Primary docs: https://docs.joinmastodon.org/api/
+
+Common endpoints used here:
+- OAuth + app registration:
+  - Apps: https://docs.joinmastodon.org/methods/apps/
+  - OAuth: https://docs.joinmastodon.org/methods/oauth/
+  - Tokens/scopes: https://docs.joinmastodon.org/api/oauth-tokens/ and https://docs.joinmastodon.org/api/oauth-scopes/
+- Timelines:
+  - Home/public timelines: https://docs.joinmastodon.org/methods/timelines/
+  - Local vs federated: use `/api/v1/timelines/public?local=true` (local) and `?local=false` (federated)
+- Trends (Trending tab):
+  - https://docs.joinmastodon.org/methods/trends/ (statuses: `/api/v1/trends/statuses`)
+
+Navigation tips:
+- Sidebar → “API Methods” → desired section (apps/oauth/timelines/trends).
+- Use the “Request” section for required params and the “Response” examples for payload shape.
